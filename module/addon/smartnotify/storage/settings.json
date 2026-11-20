@@ -1,0 +1,11 @@
+{
+    "events": {
+        "ticket_open": false,
+        "ticket_reply": false,
+        "admin_reply": false,
+        "invoice_created": false,
+        "invoice_paid": false,
+        "client_add": false,
+        "order_created": false
+    }
+}

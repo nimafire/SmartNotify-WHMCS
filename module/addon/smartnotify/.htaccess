@@ -1,0 +1,4 @@
+Options -Indexes
+<FilesMatch "^(config\.php|composer\.(json|lock)|generate-vapid\.php)$">
+    Require all denied
+</FilesMatch>

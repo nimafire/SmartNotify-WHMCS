@@ -1,0 +1,140 @@
+<?php
+
+if (!defined('WHMCS')) {
+    exit('This file cannot be accessed directly');
+}
+
+use WHMCS\Database\Capsule;
+
+function smartnotify_config()
+{
+    return [
+        'name' => 'SmartNotify',
+        'description' => 'Simple browser push notifications for WHMCS events.',
+        'author' => 'SmartNotify',
+        'language' => 'english',
+        'version' => '2.0.0',
+        'fields' => []
+    ];
+}
+
+function smartnotify_activate()
+{
+    $dir = __DIR__ . '/storage';
+    if (!is_dir($dir) && !mkdir($dir, 0750, true)) {
+        return ['status' => 'error', 'description' => 'Unable to create storage directory.'];
+    }
+    if (!file_exists($dir . '/settings.json')) {
+        file_put_contents($dir . '/settings.json', json_encode(['events' => smartnotify_default_events()], JSON_PRETTY_PRINT));
+    }
+    if (!file_exists($dir . '/subscription.json')) {
+        file_put_contents($dir . '/subscription.json', '{}');
+    }
+    $hookDirectory = ROOTDIR . '/includes/hooks';
+    if (!is_dir($hookDirectory) && !mkdir($hookDirectory, 0755, true)) {
+        return ['status' => 'error', 'description' => 'Unable to create WHMCS hook directory.'];
+    }
+    if (!copy(__DIR__ . '/includes/hooks/smartnotify.php', $hookDirectory . '/smartnotify.php')) {
+        return ['status' => 'error', 'description' => 'Unable to install WHMCS hooks.'];
+    }
+    return ['status' => 'success', 'description' => 'SmartNotify activated.'];
+}
+
+function smartnotify_deactivate()
+{
+    $hook = ROOTDIR . '/includes/hooks/smartnotify.php';
+    if (is_file($hook)) {
+        unlink($hook);
+    }
+    return ['status' => 'success', 'description' => 'SmartNotify deactivated. Stored settings were preserved.'];
+}
+
+function smartnotify_default_events()
+{
+    return [
+        'ticket_open' => true,
+        'ticket_reply' => true,
+        'admin_reply' => false,
+        'invoice_created' => false,
+        'invoice_paid' => true,
+        'client_add' => false,
+        'order_created' => false
+    ];
+}
+
+function smartnotify_output($vars)
+{
+    require_once __DIR__ . '/lib/SmartNotify.php';
+    $service = new SmartNotify();
+
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['sn_action'])) {
+        if (!function_exists('check_token') || !check_token('WHMCS.admin.default')) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['ok' => false, 'message' => 'Security token validation failed.']);
+            exit;
+        }
+        header('Content-Type: application/json; charset=utf-8');
+        try {
+            $action = (string) $_POST['sn_action'];
+            if ($action === 'save_subscription') {
+                $subscription = [
+                    'endpoint' => (string) ($_POST['endpoint'] ?? ''),
+                    'keys' => [
+                        'p256dh' => (string) ($_POST['p256dh'] ?? ''),
+                        'auth' => (string) ($_POST['auth'] ?? '')
+                    ]
+                ];
+                $service->saveSubscription($subscription);
+                echo json_encode(['ok' => true, 'message' => 'Browser connected successfully.']);
+                exit;
+            }
+            if ($action === 'disable') {
+                $service->removeSubscription();
+                echo json_encode(['ok' => true, 'message' => 'Notifications disabled.']);
+                exit;
+            }
+            if ($action === 'save_events') {
+                $events = json_decode($_POST['events'] ?? '{}', true);
+                $service->saveEvents(is_array($events) ? $events : []);
+                echo json_encode(['ok' => true, 'message' => 'Notification settings saved.']);
+                exit;
+            }
+            if ($action === 'test') {
+                $service->sendTest();
+                echo json_encode(['ok' => true, 'message' => 'Test notification sent.']);
+                exit;
+            }
+            throw new RuntimeException('Unknown action.');
+        } catch (Throwable $e) {
+            http_response_code(400);
+            echo json_encode(['ok' => false, 'message' => $e->getMessage()]);
+            exit;
+        }
+    }
+
+    $config = $service->getConfig();
+    $events = $service->getEvents();
+    $subscription = $service->getSubscription();
+    $token = function_exists('generate_token') ? generate_token('plain') : '';
+    $ajaxUrl = 'addonmodules.php?module=smartnotify';
+    $eventLabels = [
+        'ticket_open' => 'New ticket',
+        'ticket_reply' => 'Customer ticket reply',
+        'admin_reply' => 'Admin ticket reply',
+        'invoice_created' => 'New invoice',
+        'invoice_paid' => 'Invoice paid',
+        'client_add' => 'New client registration',
+        'order_created' => 'New order'
+    ];
+
+    echo '<div class="sn-wrap">';
+    echo '<style>.sn-wrap{max-width:900px}.sn-panel{background:#fff;border:1px solid #ddd;border-radius:8px;padding:20px;margin:16px 0}.sn-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.sn-state{font-weight:600}.sn-actions{display:flex;gap:8px;flex-wrap:wrap}.sn-btn{border:0;border-radius:5px;padding:9px 15px;cursor:pointer;background:#333;color:#fff}.sn-btn.green{background:#16834a}.sn-btn.red{background:#b83232}.sn-event{display:flex;align-items:center;justify-content:space-between;padding:11px 0;border-bottom:1px solid #eee}.sn-event:last-child{border:0}.sn-note{color:#777;font-size:12px}.sn-message{margin-top:12px}.sn-wrap input[type=checkbox]{width:17px;height:17px}</style>';
+    echo '<div class="sn-panel"><div class="sn-head"><div><h2 style="margin:0">Browser Notifications</h2><div class="sn-note">Receive WHMCS notifications while working in other tabs.</div></div><span class="sn-state" id="sn-status">' . ($subscription ? 'Connected' : 'Not connected') . '</span></div><div class="sn-actions" style="margin-top:18px"><button class="sn-btn green" id="sn-enable">Enable Notifications</button><button class="sn-btn red" id="sn-disable">Disable Notifications</button><button class="sn-btn" id="sn-test">Send Test</button></div><div class="sn-message" id="sn-message"></div></div>';
+    echo '<div class="sn-panel"><h3 style="margin-top:0">Notification Events</h3><div class="sn-note">Choose which WHMCS events should trigger a browser notification.</div>';
+    foreach ($eventLabels as $key => $label) {
+        echo '<label class="sn-event"><span>' . htmlspecialchars($label, ENT_QUOTES, 'UTF-8') . '</span><input type="checkbox" class="sn-event-toggle" data-event="' . $key . '" ' . (!empty($events[$key]) ? 'checked' : '') . '></label>';
+    }
+    echo '<div style="margin-top:16px"><button class="sn-btn" id="sn-save">Save Events</button></div></div></div>';
+    echo '<script>window.SmartNotifyConfig=' . json_encode(['url' => $ajaxUrl, 'token' => $token, 'publicKey' => $config['vapid_public_key'] ?? '', 'swUrl' => $service->systemUrl() . 'modules/addons/smartnotify/sw.php']) . ';</script><script src="../modules/addons/smartnotify/assets/admin.js?v=2.0.0"></script>';
+}

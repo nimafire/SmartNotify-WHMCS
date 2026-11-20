@@ -1,0 +1,9 @@
+<?php
+
+return [
+    'vapid_subject' => 'mailto:admin@example.com',
+    'vapid_public_key' => '',
+    'vapid_private_key' => '',
+    'message_length' => 180,
+    'admin_path' => 'admin'
+];

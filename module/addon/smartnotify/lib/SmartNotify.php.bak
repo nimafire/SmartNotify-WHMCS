@@ -1,0 +1,183 @@
+<?php
+
+class SmartNotify
+{
+    private string $root;
+    private string $storage;
+
+    public function __construct()
+    {
+        $this->root = dirname(__DIR__);
+        $this->storage = $this->root . '/storage';
+    }
+
+    public function getConfig(): array
+    {
+        $file = $this->root . '/config.php';
+        if (!is_file($file)) {
+            return [];
+        }
+        $config = require $file;
+        return is_array($config) ? $config : [];
+    }
+
+    public function getEvents(): array
+    {
+        $defaults = [
+            'ticket_open' => true,
+            'ticket_reply' => true,
+            'admin_reply' => false,
+            'invoice_created' => false,
+            'invoice_paid' => true,
+            'client_add' => false,
+            'order_created' => false
+        ];
+        $data = $this->readJson('settings.json', ['events' => $defaults]);
+        return array_merge($defaults, $data['events'] ?? []);
+    }
+
+    public function saveEvents(array $events): void
+    {
+        $allowed = array_keys(smartnotify_default_events());
+        $clean = [];
+        foreach ($allowed as $key) {
+            $clean[$key] = !empty($events[$key]);
+        }
+        $this->writeJson('settings.json', ['events' => $clean]);
+    }
+
+    public function getSubscription(): array
+    {
+        $data = $this->readJson('subscription.json', []);
+        return is_array($data) && !empty($data['endpoint']) ? $data : [];
+    }
+
+    public function saveSubscription($subscription): void
+    {
+        if (is_string($subscription)) {
+            $subscription = json_decode($subscription, true);
+        }
+        if (!is_array($subscription) || empty($subscription['endpoint']) || empty($subscription['keys']['p256dh']) || empty($subscription['keys']['auth'])) {
+            throw new RuntimeException('Invalid browser subscription.');
+        }
+        if (!filter_var($subscription['endpoint'], FILTER_VALIDATE_URL) || !in_array(parse_url($subscription['endpoint'], PHP_URL_SCHEME), ['https'], true)) {
+            throw new RuntimeException('Invalid push endpoint.');
+        }
+        $this->writeJson('subscription.json', $subscription);
+    }
+
+    public function removeSubscription(): void
+    {
+        $this->writeJson('subscription.json', []);
+    }
+
+    public function sendTest(): void
+    {
+        $this->send('SmartNotify Test', 'Browser push notifications are working.', $this->adminUrl());
+    }
+
+    public function notifyEvent(string $event, string $title, string $body, string $url = ''): void
+    {
+        $events = $this->getEvents();
+        if (empty($events[$event])) {
+            return;
+        }
+        $this->send($title, $body, $url ?: $this->adminUrl());
+    }
+
+    public function send(string $title, string $body, string $url): void
+    {
+        $subscriptionData = $this->getSubscription();
+        if (!$subscriptionData) {
+            return;
+        }
+        $config = $this->getConfig();
+        if (empty($config['vapid_public_key']) || empty($config['vapid_private_key']) || empty($config['vapid_subject'])) {
+            throw new RuntimeException('VAPID configuration is incomplete.');
+        }
+        $autoload = $this->root . '/vendor/autoload.php';
+        if (!is_file($autoload)) {
+            throw new RuntimeException('Web Push library is missing. Run Composer install.');
+        }
+        require_once $autoload;
+        $webPush = new Minishlink\WebPush\WebPush([
+            'VAPID' => [
+                'subject' => $config['vapid_subject'],
+                'publicKey' => $config['vapid_public_key'],
+                'privateKey' => $config['vapid_private_key']
+            ]
+        ]);
+        $subscription = Minishlink\WebPush\Subscription::create([
+            'endpoint' => $subscriptionData['endpoint'],
+            'publicKey' => $subscriptionData['keys']['p256dh'],
+            'authToken' => $subscriptionData['keys']['auth']
+        ]);
+        $payload = json_encode([
+            'title' => mb_substr(strip_tags($title), 0, 100),
+            'body' => mb_substr(strip_tags($body), 0, (int) ($config['message_length'] ?? 180)),
+            'url' => $url
+        ]);
+        $report = $webPush->sendOneNotification($subscription, $payload);
+        if (!$report->isSuccess()) {
+            if ($report->isSubscriptionExpired()) {
+                $this->removeSubscription();
+            }
+            throw new RuntimeException('Push delivery failed: ' . $report->getReason());
+        }
+    }
+
+    public function adminUrl(): string
+    {
+        $config = $this->getConfig();
+        $admin = trim((string) ($config['admin_path'] ?? 'admin'), '/');
+        return $this->systemUrl() . $admin . '/';
+    }
+
+    public function systemUrl(): string
+    {
+        try {
+            $url = \WHMCS\Config\Setting::getValue('SystemURL');
+            if ($url) {
+                return rtrim((string) $url, '/') . '/';
+            }
+        } catch (Throwable $e) {
+        }
+        return rtrim((string) ($GLOBALS['CONFIG']['SystemURL'] ?? ''), '/') . '/';
+    }
+
+    private function readJson(string $name, array $default): array
+    {
+        $file = $this->storage . '/' . $name;
+        if (!is_file($file)) {
+            return $default;
+        }
+        $content = file_get_contents($file);
+        $data = json_decode($content ?: '', true);
+        return is_array($data) ? $data : $default;
+    }
+
+    private function writeJson(string $name, array $data): void
+    {
+        if (!is_dir($this->storage) && !mkdir($this->storage, 0750, true)) {
+            throw new RuntimeException('Unable to create storage directory.');
+        }
+        $file = $this->storage . '/' . $name;
+        $handle = fopen($file, 'c+');
+        if (!$handle) {
+            throw new RuntimeException('Unable to write storage file.');
+        }
+        try {
+            if (!flock($handle, LOCK_EX)) {
+                throw new RuntimeException('Unable to lock storage file.');
+            }
+            ftruncate($handle, 0);
+            rewind($handle);
+            fwrite($handle, json_encode($data, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT));
+            fflush($handle);
+            flock($handle, LOCK_UN);
+        } finally {
+            fclose($handle);
+        }
+        @chmod($file, 0640);
+    }
+}
